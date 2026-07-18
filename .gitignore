@@ -13,3 +13,11 @@ __pycache__/
 
 # Environment variables
 .env
+
+# Private invoice documents
+invoices/*
+!invoices/.gitkeep
+
+# Generated reports
+excel/*
+!excel/.gitkeep
