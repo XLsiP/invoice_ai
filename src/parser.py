@@ -1,4 +1,5 @@
 import re
+from typing import Optional
 
 
 def extract_invoice_fields(text: str) -> dict:
@@ -87,7 +88,7 @@ def extract_invoice_fields(text: str) -> dict:
     }
 
 
-def parse_money(match: re.Match | None) -> float | None:
+def parse_money(match: Optional[re.Match]) -> Optional[float]:
     """Convert a matched currency value into a float."""
     if match is None:
         return None
