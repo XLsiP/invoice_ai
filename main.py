@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from src.database import initialize_database, save_invoice
 from src.ai_parser import extract_invoice_fields_with_ai
 from src.excel_export import export_invoices_to_excel
 from src.parser import extract_invoice_fields
@@ -10,6 +11,9 @@ from src.validator import validate_invoice
 def main() -> None:
     invoices_folder = Path("invoices")
     output_path = Path("excel/invoice_report.xlsx")
+    database_path = Path("data/invoices.db")
+
+    initialize_database(database_path)
 
     pdf_files = list(invoices_folder.glob("*.pdf"))
 
@@ -41,7 +45,7 @@ def main() -> None:
             invoice_data = extract_invoice_fields(text)
 
         # Step 4: Validate the extracted data
-        invoice_data["total_due"] = 999.99
+        
         validation_result = validate_invoice(invoice_data)
 
         invoice_data["validation_status"] = (
@@ -74,6 +78,8 @@ def main() -> None:
 
         # Add invoice to master list
         all_invoice_data.append(invoice_data)
+        save_invoice(database_path, invoice_data)
+        print("Saved to database.\n")
 
     # Step 5: Export everything to Excel
     export_invoices_to_excel(
