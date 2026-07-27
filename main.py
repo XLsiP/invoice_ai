@@ -41,6 +41,7 @@ def main() -> None:
             invoice_data = extract_invoice_fields(text)
 
         # Step 4: Validate the extracted data
+        invoice_data["total_due"] = 999.99
         validation_result = validate_invoice(invoice_data)
 
         invoice_data["validation_status"] = (

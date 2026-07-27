@@ -17,6 +17,8 @@ def export_invoices_to_excel(invoices: list[dict], output_path: Path) -> None:
         "Tax",
         "Shipping",
         "Total Due",
+        "Validation Status",
+        "Validation Errors",
 
     ]
 
@@ -34,6 +36,8 @@ def export_invoices_to_excel(invoices: list[dict], output_path: Path) -> None:
                 invoice.get("tax"),
                 invoice.get("shipping"),
                 invoice.get("total_due"),
+                invoice.get("validation_status"),
+                invoice.get("validation_errors"),
             ]
         )
 
