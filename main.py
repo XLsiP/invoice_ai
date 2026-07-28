@@ -6,7 +6,7 @@ from src.database import (
 from src.ai_parser import extract_invoice_fields_with_ai
 from src.excel_export import export_invoices_to_excel
 from src.parser import extract_invoice_fields
-from src.pdf_reader import extract_text_from_pdf
+from src.pdf_reader import extract_text_from_file
 from src.validator import validate_invoice
 
 
@@ -17,22 +17,34 @@ def main() -> None:
 
     initialize_database(database_path)
 
-    pdf_files = list(invoices_folder.glob("*.pdf"))
+    supported_extensions = {
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+}
 
-    if not pdf_files:
-        print("No PDF invoices found.")
+    invoice_files = [
+        file_path
+        for file_path in invoices_folder.iterdir()
+        if file_path.is_file()
+        and file_path.suffix.lower() in supported_extensions
+]
+
+    if not invoice_files:
+        print("No supported invoice files found.")
         return
 
-    print(f"Found {len(pdf_files)} invoice(s).\n")
+    print(f"Found {len(invoice_files)} invoice(s).\n")
 
     all_invoice_data = []
 
-    for pdf_path in pdf_files:
+    for file_path in invoice_files:
         print("=" * 50)
-        print(f"Processing: {pdf_path.name}")
+        print(f"Processing: {file_path.name}")
 
         # Step 1: Read the PDF
-        text = extract_text_from_pdf(pdf_path)
+        text = extract_text_from_file(file_path)
 
         # Step 2: Try AI parser first
         try:
@@ -61,7 +73,7 @@ def main() -> None:
         )
 
         # Save the source filename
-        invoice_data["source_file"] = pdf_path.name
+        invoice_data["source_file"] = file_path.name
 
         # Display results in terminal
         print(f"Validation: {invoice_data['validation_status']}")
