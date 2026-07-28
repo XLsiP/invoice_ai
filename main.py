@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from src.database import initialize_database, save_invoice
+from src.database import (
+    get_all_invoices, initialize_database, save_invoice, search_invoices,
+)
 from src.ai_parser import extract_invoice_fields_with_ai
 from src.excel_export import export_invoices_to_excel
 from src.parser import extract_invoice_fields
@@ -78,8 +80,17 @@ def main() -> None:
 
         # Add invoice to master list
         all_invoice_data.append(invoice_data)
-        save_invoice(database_path, invoice_data)
-        print("Saved to database.\n")
+
+        was_saved = save_invoice(database_path, invoice_data)
+
+        if was_saved:
+            print("Saved to database.\n")
+        else:
+            print(
+                "⚠️ Duplicate invoice detected. "
+                "Database insert skipped.\n"
+            )
+            
 
     # Step 5: Export everything to Excel
     export_invoices_to_excel(
