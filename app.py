@@ -6,13 +6,19 @@ import pandas as pd
 import streamlit as st
 
 from src.ai_parser import extract_invoice_fields_with_ai
+from src.line_item_parser import extract_line_items_with_ai
+
 from src.database import (
-    get_all_invoices,
     initialize_database,
     save_invoice,
+    get_all_invoices,
     search_invoices,
+    get_invoice_line_items,
+    get_vendor_statistics,
 )
+
 from src.excel_export import export_invoices_to_excel
+
 from src.parser import extract_invoice_fields
 from src.pdf_reader import extract_text_from_file
 from src.validator import validate_invoice
@@ -229,6 +235,21 @@ def apply_styles() -> None:
             border-radius: 12px;
         }
 
+        .invoice-preview {
+            padding: 12px;
+            background: white;
+            border: 1px solid #e4e4e7;
+            border-radius: 12px;
+        }
+
+        .invoice-preview iframe {
+            width: 100%;
+            height: 720px;
+            border: none;
+            border-radius: 8px;
+        }
+
+
         details {
             background: white !important;
             border: 1px solid #e4e4e7 !important;
@@ -348,10 +369,10 @@ def prepare_invoice(
     return invoice_data
 
 
-def process_uploaded_file(
-    uploaded_file: Any,
-) -> Dict[str, Any]:
-    """Process one uploaded invoice."""
+def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
+    """
+    Process an uploaded invoice without immediately saving it.
+    """
 
     UPLOAD_FOLDER.mkdir(
         parents=True,
@@ -364,33 +385,441 @@ def process_uploaded_file(
     text = extract_text_from_file(saved_path)
 
     try:
+
         invoice_data = extract_invoice_fields_with_ai(text)
+
         parser_used = "AI"
 
     except Exception as error:
+
         invoice_data = extract_invoice_fields(text)
+
         parser_used = "Regex fallback"
+
         invoice_data["parser_error"] = str(error)
+
+    #
+    # NEW
+    # Extract purchased items using GPT
+    #
+
+    try:
+
+        invoice_data["line_items"] = (
+            extract_line_items_with_ai(text)
+        )
+
+    except Exception:
+
+        invoice_data["line_items"] = []
 
     invoice_data = prepare_invoice(
         invoice_data,
         uploaded_file.name,
     )
 
-    was_saved = save_invoice(
-        DATABASE_PATH,
-        invoice_data,
+    invoice_data["parser_used"] = parser_used
+
+    invoice_data["database_result"] = "Awaiting approval"
+
+    invoice_data["saved"] = False
+
+    return invoice_data
+
+
+def clean_text_value(value: Any) -> str:
+    """Convert an extracted value into editable text."""
+
+    if value is None:
+        return ""
+
+    return str(value)
+
+
+def clean_number_value(value: Any) -> float:
+    """Convert an extracted value into a safe number."""
+
+    if value in (None, ""):
+        return 0.0
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    
+def prepare_line_items(invoice: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Convert extracted line items into a dataframe that can be
+    edited inside Streamlit.
+    """
+
+    items = invoice.get("line_items", [])
+
+    if not items:
+        items = [
+            {
+                "description": "",
+                "quantity": 1,
+                "unit_price": 0.0,
+                "line_total": 0.0,
+            }
+        ]
+
+    return pd.DataFrame(items)
+
+def calculate_line_item_total(items: pd.DataFrame) -> float:
+    """
+    Calculate total from edited line items.
+    """
+
+    if items.empty:
+        return 0.0
+
+    total = 0
+
+    for _, row in items.iterrows():
+        try:
+            total += float(row["line_total"])
+        except Exception:
+            pass
+
+    return round(total, 2)
+
+def clean_line_items(items: pd.DataFrame) -> List[Dict]:
+    """
+    Convert dataframe back into JSON for SQLite.
+    """
+
+    cleaned = []
+
+    for _, row in items.iterrows():
+
+        if (
+            str(row["description"]).strip() == ""
+            and float(row["line_total"] or 0) == 0
+        ):
+            continue
+
+        cleaned.append(
+            {
+                "description": str(row["description"]).strip(),
+                "quantity": float(row["quantity"]),
+                "unit_price": float(row["unit_price"]),
+                "line_total": float(row["line_total"]),
+            }
+        )
+
+    return cleaned
+
+
+
+
+
+def render_invoice_preview(source_file: str) -> None:
+    """Display the original uploaded PDF or image."""
+
+    import base64
+
+    file_path = UPLOAD_FOLDER / source_file
+
+    if not file_path.exists():
+        st.warning("The original uploaded file could not be found.")
+        return
+
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".pdf":
+        pdf_data = base64.b64encode(
+            file_path.read_bytes()
+        ).decode("utf-8")
+
+        st.markdown(
+            (
+                '<div class="invoice-preview">'
+                f'<iframe src="data:application/pdf;base64,{pdf_data}">'
+                "</iframe>"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+    elif suffix in {".png", ".jpg", ".jpeg"}:
+        st.image(
+            str(file_path),
+            use_container_width=True,
+        )
+
+    else:
+        st.info("Preview is unavailable for this file type.")
+
+
+def render_invoice_review_form(
+    invoice: Dict[str, Any],
+    invoice_index: int,
+) -> None:
+    """Show the original invoice beside editable extracted data."""
+
+    source_file = invoice.get("source_file", "Invoice")
+    parser_used = invoice.get("parser_used", "Unknown")
+    form_key = f"invoice_review_{invoice_index}"
+
+    if invoice.get("saved"):
+        st.success(f"{source_file} has already been saved.")
+
+        preview_column, data_column = st.columns(
+            [1.15, 1],
+            gap="large",
+        )
+
+        with preview_column:
+            st.subheader("Original invoice")
+            render_invoice_preview(source_file)
+
+        with data_column:
+            st.subheader("Saved information")
+            display_processed_invoice(invoice)
+
+            saved_items = invoice.get("line_items", [])
+
+            if saved_items:
+                st.markdown("#### Purchased items")
+
+                st.dataframe(
+                    pd.DataFrame(saved_items),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "description": st.column_config.TextColumn(
+                            "Description",
+                            width="large",
+                        ),
+                        "quantity": st.column_config.NumberColumn(
+                            "Qty",
+                            format="%.2f",
+                        ),
+                        "unit_price": st.column_config.NumberColumn(
+                            "Unit Price",
+                            format="$%.2f",
+                        ),
+                        "line_total": st.column_config.NumberColumn(
+                            "Line Total",
+                            format="$%.2f",
+                        ),
+                    },
+                )
+
+        return
+
+    st.caption(
+        f"Extracted using {parser_used}. "
+        "Compare the original invoice with the extracted data "
+        "before approving."
     )
 
-    invoice_data["parser_used"] = parser_used
-    invoice_data["database_result"] = (
+    preview_column, review_column = st.columns(
+        [1.05, 1],
+        gap="large",
+    )
+
+    with preview_column:
+        st.subheader("Original invoice")
+        render_invoice_preview(source_file)
+
+    with review_column:
+        st.subheader("Review extracted data")
+
+        with st.form(form_key):
+            vendor = st.text_input(
+                "Vendor",
+                value=clean_text_value(invoice.get("vendor")),
+            )
+
+            invoice_number = st.text_input(
+                "Invoice Number",
+                value=clean_text_value(
+                    invoice.get("invoice_number")
+                ),
+            )
+
+            date_left, date_right = st.columns(2)
+
+            with date_left:
+                invoice_date = st.text_input(
+                    "Invoice Date",
+                    value=clean_text_value(
+                        invoice.get("invoice_date")
+                    ),
+                    placeholder="YYYY-MM-DD",
+                )
+
+            with date_right:
+                due_date = st.text_input(
+                    "Due Date",
+                    value=clean_text_value(
+                        invoice.get("due_date")
+                    ),
+                    placeholder="YYYY-MM-DD",
+                )
+
+            money_left, money_right = st.columns(2)
+
+            with money_left:
+                subtotal = st.number_input(
+                    "Subtotal",
+                    value=clean_number_value(
+                        invoice.get("subtotal")
+                    ),
+                    min_value=0.0,
+                    step=0.01,
+                    format="%.2f",
+                )
+
+                tax = st.number_input(
+                    "Tax",
+                    value=clean_number_value(
+                        invoice.get("tax")
+                    ),
+                    min_value=0.0,
+                    step=0.01,
+                    format="%.2f",
+                )
+
+            with money_right:
+                shipping = st.number_input(
+                    "Shipping",
+                    value=clean_number_value(
+                        invoice.get("shipping")
+                    ),
+                    min_value=0.0,
+                    step=0.01,
+                    format="%.2f",
+                )
+
+                total_due = st.number_input(
+                    "Total Due",
+                    value=clean_number_value(
+                        invoice.get("total_due")
+                    ),
+                    min_value=0.0,
+                    step=0.01,
+                    format="%.2f",
+                )
+
+            description = st.text_area(
+                "Description",
+                value=clean_text_value(
+                    invoice.get("description")
+                ),
+                height=90,
+            )
+
+            st.markdown("#### Purchased Items")
+
+            st.caption(
+                "Edit, add, or delete extracted line items."
+            )
+
+            edited_items = st.data_editor(
+                prepare_line_items(invoice),
+                hide_index=True,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "description": st.column_config.TextColumn(
+                        "Description",
+                        width="large",
+                    ),
+                    "quantity": st.column_config.NumberColumn(
+                        "Qty",
+                        min_value=0,
+                        step=1,
+                    ),
+                    "unit_price": st.column_config.NumberColumn(
+                        "Unit Price",
+                        format="$%.2f",
+                    ),
+                    "line_total": st.column_config.NumberColumn(
+                        "Line Total",
+                        format="$%.2f",
+                    ),
+                },
+            )
+
+            calculated_total = calculate_line_item_total(
+                edited_items
+            )
+
+            st.metric(
+                "Purchased Items Total",
+                f"${calculated_total:,.2f}",
+            )
+
+            difference = round(
+                total_due - calculated_total,
+                2,
+            )
+
+            if abs(difference) < 0.01:
+                st.success(
+                    "Invoice total matches purchased items."
+                )
+            else:
+                st.warning(
+                    "Difference between invoice and item totals: "
+                    f"${difference:,.2f}"
+                )
+
+            approve = st.form_submit_button(
+                "Approve and Save",
+                type="primary",
+                use_container_width=True,
+            )
+
+    if not approve:
+        return
+
+    corrected_invoice = {
+        **invoice,
+        "vendor": vendor.strip() or None,
+        "invoice_number": invoice_number.strip() or None,
+        "invoice_date": invoice_date.strip() or None,
+        "due_date": due_date.strip() or None,
+        "description": description.strip() or None,
+        "subtotal": subtotal,
+        "tax": tax,
+        "shipping": shipping,
+        "total_due": total_due,
+        "line_items": clean_line_items(edited_items),
+    }
+
+    corrected_invoice = prepare_invoice(
+        corrected_invoice,
+        source_file,
+    )
+
+    was_saved = save_invoice(
+        DATABASE_PATH,
+        corrected_invoice,
+    )
+
+    corrected_invoice["saved"] = True
+    corrected_invoice["parser_used"] = parser_used
+    corrected_invoice["database_result"] = (
         "Saved"
         if was_saved
         else "Duplicate skipped"
     )
 
-    return invoice_data
+    processed = st.session_state["processed_invoices"]
+    processed[invoice_index] = corrected_invoice
+    st.session_state["processed_invoices"] = processed
 
+    if was_saved:
+        st.success("Invoice approved and saved.")
+    else:
+        st.warning("Duplicate invoice detected.")
+
+    st.rerun()
 
 def invoices_to_dataframe(
     invoices: List[Dict[str, Any]],
@@ -496,14 +925,14 @@ def display_processed_invoice(
 
 
 def render_upload_page() -> None:
-    """Render the upload page."""
+    """Render invoice extraction and manual approval."""
 
     render_section(
         "Upload",
-        "Process invoice files",
+        "Process and review invoice files",
         (
-            "Drag and drop digital PDFs, scanned PDFs, "
-            "PNG images, JPGs or JPEGs."
+            "Upload invoices, review the extracted fields, "
+            "correct any mistakes, and approve each record."
         ),
     )
 
@@ -520,7 +949,7 @@ def render_upload_page() -> None:
         )
 
         if st.button(
-            "Process invoices",
+            "Extract invoice data",
             type="primary",
             use_container_width=True,
         ):
@@ -529,7 +958,7 @@ def render_upload_page() -> None:
 
             for index, uploaded_file in enumerate(uploaded_files):
                 with st.spinner(
-                    f"Processing {uploaded_file.name}..."
+                    f"Extracting {uploaded_file.name}..."
                 ):
                     try:
                         invoice = process_uploaded_file(
@@ -553,8 +982,8 @@ def render_upload_page() -> None:
 
             if processed_invoices:
                 st.success(
-                    f"Processed "
-                    f"{len(processed_invoices)} invoice(s)."
+                    f"Extracted {len(processed_invoices)} invoice(s). "
+                    "Review and approve them below."
                 )
 
     processed_invoices = st.session_state.get(
@@ -562,78 +991,100 @@ def render_upload_page() -> None:
         [],
     )
 
-    if processed_invoices:
-        st.divider()
-        st.subheader("Processing results")
+    if not processed_invoices:
+        return
 
-        for invoice in processed_invoices:
-            title = (
-                f"{invoice.get('source_file', 'Invoice')} — "
-                f"{invoice.get('validation_status', 'Unknown')}"
+    st.divider()
+
+    pending_count = sum(
+        1
+        for invoice in processed_invoices
+        if not invoice.get("saved")
+    )
+
+    saved_count = len(processed_invoices) - pending_count
+
+    metric_one, metric_two = st.columns(2)
+    metric_one.metric("Awaiting approval", pending_count)
+    metric_two.metric("Completed", saved_count)
+
+    st.subheader("Manual review")
+
+    for index, invoice in enumerate(processed_invoices):
+        status = (
+            invoice.get("database_result")
+            if invoice.get("saved")
+            else invoice.get("validation_status", "Needs Review")
+        )
+
+        title = (
+            f"{invoice.get('source_file', 'Invoice')} — {status}"
+        )
+
+        with st.expander(
+            title,
+            expanded=not invoice.get("saved"),
+        ):
+            render_invoice_review_form(
+                invoice,
+                index,
             )
 
-            with st.expander(
-                title,
-                expanded=True,
-            ):
-                display_processed_invoice(invoice)
-
+    if st.button(
+        "Clear completed upload session",
+        use_container_width=True,
+    ):
+        st.session_state.pop("processed_invoices", None)
+        st.rerun()
 
 def render_database_page() -> None:
-    """Render the database page."""
+    """Search and review invoices stored in SQLite."""
 
     render_section(
         "Database",
-        "Stored invoice records",
-        "Search and review invoices stored in SQLite.",
+        "Invoice Database",
+        (
+            "Search invoices, inspect purchased items, "
+            "and review the original source file."
+        ),
     )
 
     search_term = st.text_input(
-        "Search records",
-        placeholder=(
-            "Search vendor, invoice number, or filename..."
-        ),
+        "Search",
+        placeholder="Vendor, invoice number, purchased item...",
         label_visibility="collapsed",
     )
 
     if search_term.strip():
-        invoices = search_invoices(
-            DATABASE_PATH,
-            search_term,
-        )
+        invoices = search_invoices(DATABASE_PATH, search_term)
     else:
         invoices = get_all_invoices(DATABASE_PATH)
 
-    dataframe = invoices_to_dataframe(invoices)
-
-    if dataframe.empty:
-        st.info("No invoice records found.")
+    if not invoices:
+        st.info("No invoices found.")
         return
 
+    dataframe = invoices_to_dataframe(invoices)
     dataframe["total_due"] = pd.to_numeric(
         dataframe["total_due"],
         errors="coerce",
     ).fillna(0)
 
-    total_value = dataframe["total_due"].sum()
-
-    valid_count = (
-        dataframe["validation_status"]
-        .fillna("")
-        .eq("Valid")
-        .sum()
+    metric1, metric2, metric3 = st.columns(3)
+    metric1.metric("Invoices", len(dataframe))
+    metric2.metric(
+        "Total Spending",
+        f"${dataframe['total_due'].sum():,.2f}",
+    )
+    metric3.metric(
+        "Average Invoice",
+        f"${dataframe['total_due'].mean():,.2f}",
     )
 
-    metric_one, metric_two, metric_three = st.columns(3)
-
-    metric_one.metric("Invoices", len(dataframe))
-    metric_two.metric("Total value", f"${total_value:,.2f}")
-    metric_three.metric("Validated", int(valid_count))
-
     st.divider()
-    st.subheader("Invoice list")
+    st.subheader("Invoice List")
 
-    table_columns = [
+    display_columns = [
         "vendor",
         "invoice_number",
         "invoice_date",
@@ -641,126 +1092,473 @@ def render_database_page() -> None:
         "validation_status",
     ]
 
-    table_columns = [
+    available_columns = [
         column
-        for column in table_columns
+        for column in display_columns
         if column in dataframe.columns
     ]
 
-    display_dataframe = dataframe[table_columns].copy()
-
     st.dataframe(
-        display_dataframe,
-        use_container_width=True,
+        dataframe[available_columns].copy(),
         hide_index=True,
-        height=min(420, 90 + (len(display_dataframe) * 38)),
-        row_height=38,
+        use_container_width=True,
         column_config={
             "vendor": st.column_config.TextColumn(
                 "Vendor",
                 width="large",
             ),
             "invoice_number": st.column_config.TextColumn(
-                "Invoice Number",
-                width="medium",
+                "Invoice #",
             ),
-            "invoice_date": st.column_config.TextColumn(
-                "Invoice Date",
-                width="medium",
-            ),
+            "invoice_date": "Invoice Date",
             "total_due": st.column_config.NumberColumn(
-                "Total Due",
+                "Total",
                 format="$%.2f",
-                width="small",
             ),
-            "validation_status": st.column_config.TextColumn(
-                "Status",
-                width="medium",
+            "validation_status": "Status",
+        },
+    )
+
+    st.divider()
+    st.subheader("Invoice Viewer")
+
+    options = []
+
+    for invoice in invoices:
+        vendor = invoice.get("vendor") or "Unknown"
+        number = invoice.get("invoice_number") or (
+            f"ID {invoice.get('id')}"
+        )
+        total = format_money(invoice.get("total_due"))
+        options.append(f"{vendor} — {number} — {total}")
+
+    selected = st.selectbox(
+        "Choose an invoice",
+        options,
+    )
+    invoice = invoices[options.index(selected)]
+
+    preview_col, info_col = st.columns(
+        [1.15, 1],
+        gap="large",
+    )
+
+    with preview_col:
+        st.markdown("### Original Invoice")
+        source_file = invoice.get("source_file")
+
+        if source_file:
+            render_invoice_preview(source_file)
+        else:
+            st.info("Original invoice unavailable.")
+
+    with info_col:
+        st.markdown("### Invoice Information")
+        st.write(
+            f"**Vendor:** "
+            f"{invoice.get('vendor') or 'Missing'}"
+        )
+        st.write(
+            f"**Invoice #:** "
+            f"{invoice.get('invoice_number') or 'Missing'}"
+        )
+        st.write(
+            f"**Invoice Date:** "
+            f"{invoice.get('invoice_date') or 'Missing'}"
+        )
+        st.write(
+            f"**Due Date:** "
+            f"{invoice.get('due_date') or 'Missing'}"
+        )
+        st.write(
+            f"**Description:** "
+            f"{invoice.get('description') or 'Missing'}"
+        )
+
+        st.divider()
+        st.markdown("### Financials")
+
+        finance_left, finance_right = st.columns(2)
+
+        with finance_left:
+            st.metric(
+                "Subtotal",
+                format_money(invoice.get("subtotal")),
+            )
+            st.metric(
+                "Tax",
+                format_money(invoice.get("tax")),
+            )
+
+        with finance_right:
+            st.metric(
+                "Shipping",
+                format_money(invoice.get("shipping")),
+            )
+            st.metric(
+                "Total Due",
+                format_money(invoice.get("total_due")),
+            )
+
+    st.divider()
+    st.subheader("Purchased Items")
+
+    items = get_invoice_line_items(
+        DATABASE_PATH,
+        invoice["id"],
+    )
+
+    item_df = pd.DataFrame()
+
+    if items:
+        item_df = pd.DataFrame(items)
+
+        item_columns = [
+            column
+            for column in [
+                "description",
+                "quantity",
+                "unit_price",
+                "line_total",
+            ]
+            if column in item_df.columns
+        ]
+
+        st.dataframe(
+            item_df[item_columns],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "description": st.column_config.TextColumn(
+                    "Description",
+                    width="large",
+                ),
+                "quantity": st.column_config.NumberColumn(
+                    "Qty",
+                    format="%.2f",
+                ),
+                "unit_price": st.column_config.NumberColumn(
+                    "Unit Price",
+                    format="$%.2f",
+                ),
+                "line_total": st.column_config.NumberColumn(
+                    "Line Total",
+                    format="$%.2f",
+                ),
+            },
+        )
+    else:
+        st.info(
+            "No purchased items stored for this invoice."
+        )
+
+    st.divider()
+    st.subheader("Invoice Summary")
+
+    items_total = 0.0
+
+    if not item_df.empty and "line_total" in item_df.columns:
+        items_total = float(
+            pd.to_numeric(
+                item_df["line_total"],
+                errors="coerce",
+            ).fillna(0).sum()
+        )
+
+    invoice_total = clean_number_value(
+        invoice.get("total_due")
+    )
+    difference = round(
+        invoice_total - items_total,
+        2,
+    )
+
+    summary_left, summary_middle, summary_right = st.columns(3)
+
+    summary_left.metric(
+        "Purchased Items",
+        len(items),
+    )
+    summary_middle.metric(
+        "Items Total",
+        f"${items_total:,.2f}",
+    )
+    summary_right.metric(
+        "Invoice Total",
+        f"${invoice_total:,.2f}",
+    )
+
+    if abs(difference) < 0.01:
+        st.success(
+            "Invoice and purchased-item totals match."
+        )
+    else:
+        st.warning(
+            "Difference between invoice and item totals: "
+            f"${difference:,.2f}"
+        )
+
+    st.divider()
+    st.subheader("System Information")
+
+    system_left, system_right = st.columns(2)
+
+    with system_left:
+        st.write(
+            f"**Validation Status:** "
+            f"{invoice.get('validation_status') or 'Unknown'}"
+        )
+        st.write(
+            f"**Source File:** "
+            f"{invoice.get('source_file') or 'Unknown'}"
+        )
+
+    with system_right:
+        st.write(
+            f"**Created:** "
+            f"{invoice.get('created_at') or 'Unknown'}"
+        )
+
+        if invoice.get("validation_errors"):
+            st.error(
+                invoice["validation_errors"]
+            )
+
+def render_vendor_page() -> None:
+    """
+    Display vendor spending analytics.
+    """
+
+    render_section(
+        "Vendors",
+        "Vendor Analytics",
+        "Analyze spending patterns across vendors.",
+    )
+
+    vendors = get_vendor_statistics(DATABASE_PATH)
+
+    if not vendors:
+        st.info("No vendor information available.")
+        return
+
+    vendor_df = pd.DataFrame(vendors)
+
+    st.subheader("Vendor Summary")
+
+    st.dataframe(
+        vendor_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "vendor": st.column_config.TextColumn(
+                "Vendor",
+                width="large",
+            ),
+            "invoice_count": st.column_config.NumberColumn(
+                "Invoices"
+            ),
+            "total_spend": st.column_config.NumberColumn(
+                "Total Spend",
+                format="$%.2f",
+            ),
+            "average_invoice": st.column_config.NumberColumn(
+                "Average Invoice",
+                format="$%.2f",
+            ),
+            "largest_invoice": st.column_config.NumberColumn(
+                "Largest Invoice",
+                format="$%.2f",
             ),
         },
     )
 
     st.divider()
-    st.subheader("Full invoice details")
 
-    record_options = []
+    col1, col2, col3, col4 = st.columns(4)
 
-    for index, invoice in enumerate(invoices):
-        vendor = invoice.get("vendor") or "Unknown vendor"
-        invoice_number = (
-            invoice.get("invoice_number")
-            or f"Record {invoice.get('id', index + 1)}"
-        )
-        record_options.append(f"{vendor} — {invoice_number}")
-
-    selected_label = st.selectbox(
-        "Choose an invoice",
-        record_options,
+    col1.metric(
+        "Total Vendors",
+        len(vendor_df),
     )
 
-    selected_index = record_options.index(selected_label)
-    selected_invoice = invoices[selected_index]
+    col2.metric(
+        "Total Spend",
+        f"${vendor_df['total_spend'].sum():,.2f}",
+    )
 
-    detail_one, detail_two, detail_three = st.columns(3)
+    col3.metric(
+        "Invoices",
+        int(vendor_df["invoice_count"].sum()),
+    )
 
-    with detail_one:
-        st.write(
-            f"**Vendor:** "
-            f"{selected_invoice.get('vendor') or 'Missing'}"
+    col4.metric(
+        "Average Vendor Spend",
+        f"${vendor_df['total_spend'].mean():,.2f}",
+    )
+
+    st.divider()
+
+    st.subheader("Top Vendors")
+
+    chart = (
+        alt.Chart(
+            vendor_df.sort_values(
+                "total_spend",
+                ascending=False,
+            ).head(10)
         )
-        st.write(
-            f"**Invoice number:** "
-            f"{selected_invoice.get('invoice_number') or 'Missing'}"
+        .mark_bar(
+            cornerRadiusTopRight=4,
+            cornerRadiusBottomRight=4,
         )
-        st.write(
-            f"**Invoice date:** "
-            f"{selected_invoice.get('invoice_date') or 'Missing'}"
+        .encode(
+            y=alt.Y(
+                "vendor:N",
+                sort="-x",
+                title=None,
+            ),
+            x=alt.X(
+                "total_spend:Q",
+                title="Total Spend",
+            ),
+            tooltip=[
+                "vendor",
+                alt.Tooltip(
+                    "total_spend:Q",
+                    format="$,.2f",
+                ),
+                "invoice_count",
+            ],
         )
-        st.write(
-            f"**Due date:** "
-            f"{selected_invoice.get('due_date') or 'Missing'}"
+        .properties(
+            height=400,
+        )
+    )
+
+    st.altair_chart(
+        configure_chart(chart),
+        use_container_width=True,
+    )
+
+    st.divider()
+
+    st.subheader("Vendor Details")
+
+    vendor_name = st.selectbox(
+        "Choose a vendor",
+        vendor_df["vendor"].tolist(),
+    )
+
+    invoices = [
+        invoice
+        for invoice in get_all_invoices(DATABASE_PATH)
+        if invoice.get("vendor") == vendor_name
+    ]
+
+    if not invoices:
+        return
+
+    spend = sum(
+        float(i.get("total_due") or 0)
+        for i in invoices
+    )
+
+    largest = max(
+        float(i.get("total_due") or 0)
+        for i in invoices
+    )
+
+    avg = spend / len(invoices)
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "Invoices",
+        len(invoices),
+    )
+
+    c2.metric(
+        "Total Spend",
+        f"${spend:,.2f}",
+    )
+
+    c3.metric(
+        "Largest Invoice",
+        f"${largest:,.2f}",
+    )
+
+    st.metric(
+        "Average Invoice",
+        f"${avg:,.2f}",
+    )
+
+    st.subheader("Invoices")
+
+    invoice_df = pd.DataFrame(invoices)
+
+    st.dataframe(
+        invoice_df[
+            [
+                "invoice_number",
+                "invoice_date",
+                "total_due",
+                "validation_status",
+            ]
+        ],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "invoice_number": "Invoice #",
+            "invoice_date": "Date",
+            "total_due": st.column_config.NumberColumn(
+                "Total",
+                format="$%.2f",
+            ),
+            "validation_status": "Status",
+        },
+    )
+
+    st.subheader("Purchased Items")
+
+    all_items = []
+
+    for invoice in invoices:
+
+        items = get_invoice_line_items(
+            DATABASE_PATH,
+            invoice["id"],
         )
 
-    with detail_two:
-        st.write(
-            f"**Subtotal:** "
-            f"{format_money(selected_invoice.get('subtotal'))}"
-        )
-        st.write(
-            f"**Tax:** "
-            f"{format_money(selected_invoice.get('tax'))}"
-        )
-        st.write(
-            f"**Shipping:** "
-            f"{format_money(selected_invoice.get('shipping'))}"
-        )
-        st.write(
-            f"**Total due:** "
-            f"{format_money(selected_invoice.get('total_due'))}"
-        )
+        all_items.extend(items)
 
-    with detail_three:
-        st.write(
-            f"**Status:** "
-            f"{selected_invoice.get('validation_status') or 'Unknown'}"
-        )
-        st.write(
-            f"**Source file:** "
-            f"{selected_invoice.get('source_file') or 'Unknown'}"
-        )
-        st.write(
-            f"**Created:** "
-            f"{selected_invoice.get('created_at') or 'Unknown'}"
-        )
+    if all_items:
 
-    if selected_invoice.get("description"):
-        st.write(
-            f"**Description:** "
-            f"{selected_invoice.get('description')}"
+        st.dataframe(
+            pd.DataFrame(all_items),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "description":
+                    st.column_config.TextColumn(
+                        "Description",
+                        width="large",
+                    ),
+                "quantity":
+                    st.column_config.NumberColumn(
+                        "Qty",
+                    ),
+                "unit_price":
+                    st.column_config.NumberColumn(
+                        "Unit Price",
+                        format="$%.2f",
+                    ),
+                "line_total":
+                    st.column_config.NumberColumn(
+                        "Total",
+                        format="$%.2f",
+                    ),
+            },
         )
-
-    if selected_invoice.get("validation_errors"):
-        st.error(selected_invoice.get("validation_errors"))
 
 def render_export_page() -> None:
     """Render the Excel export page."""
@@ -799,9 +1597,24 @@ def render_export_page() -> None:
         use_container_width=True,
     ):
         export_invoices_to_excel(
-            invoices,
-            EXCEL_PATH,
+    invoices,
+    EXCEL_PATH,
+    line_items=[
+        {
+            **item,
+            "vendor": invoice["vendor"],
+            "invoice_number": invoice["invoice_number"],
+        }
+        for invoice in invoices
+        for item in get_invoice_line_items(
+            DATABASE_PATH,
+            invoice["id"],
         )
+    ],
+    vendor_summary=get_vendor_statistics(
+        DATABASE_PATH,
+    ),
+)
 
         st.success("Excel spreadsheet generated.")
 
@@ -1307,10 +2120,11 @@ def main() -> None:
     navigation = st.radio(
         "Navigation",
         [
-            "Upload",
-            "Database",
-            "Export",
-            "Overview",
+        "Upload",
+        "Database",
+        "Vendors",
+        "Export",
+        "Overview",
         ],
         horizontal=True,
         label_visibility="collapsed",
@@ -1321,6 +2135,9 @@ def main() -> None:
 
     elif navigation == "Database":
         render_database_page()
+
+    elif navigation == "Vendors":
+        render_vendor_page()
 
     elif navigation == "Export":
         render_export_page()

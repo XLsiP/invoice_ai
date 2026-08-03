@@ -1,204 +1,235 @@
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 
-HEADERS = [
-    "Source File",
-    "Vendor",
-    "Invoice Number",
-    "Invoice Date",
-    "Due Date",
-    "Description",
-    "Subtotal",
-    "Tax",
-    "Shipping",
-    "Total Due",
-    "Validation Status",
-    "Validation Errors",
-    "Created At",
-]
+def _style_header(ws):
+    fill = PatternFill(fill_type="solid", fgColor="F15A24")
+    font = Font(color="FFFFFF", bold=True)
 
-FIELD_KEYS = [
-    "source_file",
-    "vendor",
-    "invoice_number",
-    "invoice_date",
-    "due_date",
-    "description",
-    "subtotal",
-    "tax",
-    "shipping",
-    "total_due",
-    "validation_status",
-    "validation_errors",
-    "created_at",
-]
+    for cell in ws[1]:
+        cell.fill = fill
+        cell.font = font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.freeze_panes = "A2"
+    return fill
+
+
+def _make_table(ws, name):
+    if ws.max_row < 2:
+        return
+
+    from openpyxl.utils import get_column_letter
+
+    end = get_column_letter(ws.max_column)
+    table = Table(
+        displayName=name,
+        ref=f"A1:{end}{ws.max_row}",
+    )
+
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+
+    ws.add_table(table)
+
+
+def _autosize(ws) -> None:
+    """Resize worksheet columns while safely ignoring merged cells."""
+
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.utils import get_column_letter
+
+    for column_index in range(1, ws.max_column + 1):
+        max_length = 0
+
+        for row_index in range(1, ws.max_row + 1):
+            cell = ws.cell(
+                row=row_index,
+                column=column_index,
+            )
+
+            if isinstance(cell, MergedCell):
+                continue
+
+            value = cell.value
+
+            if value is None:
+                continue
+
+            max_length = max(
+                max_length,
+                len(str(value)),
+            )
+
+        column_letter = get_column_letter(
+            column_index
+        )
+
+        ws.column_dimensions[
+            column_letter
+        ].width = min(
+            max(max_length + 3, 12),
+            40,
+        )
 
 
 def export_invoices_to_excel(
     invoices: List[Dict[str, Any]],
     output_path: Path,
+    line_items: Optional[List[Dict[str, Any]]] = None,
+    vendor_summary: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """Export invoice records to a readable Excel workbook."""
 
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet.title = "Invoices"
+    wb = Workbook()
 
-    worksheet.append(HEADERS)
+    # ---------------- Invoices ----------------
 
-    for invoice in invoices:
-        worksheet.append(
-            [
-                invoice.get(field_key)
-                for field_key in FIELD_KEYS
-            ]
-        )
+    ws = wb.active
+    ws.title = "Invoices"
 
-    header_fill = PatternFill(
-        fill_type="solid",
-        fgColor="F15A24",
-    )
-    header_font = Font(
-        color="FFFFFF",
-        bold=True,
-    )
-    thin_gray = Side(
-        style="thin",
-        color="D9D9D9",
-    )
+    invoice_headers = [
+        "Source File",
+        "Vendor",
+        "Invoice Number",
+        "Invoice Date",
+        "Due Date",
+        "Description",
+        "Subtotal",
+        "Tax",
+        "Shipping",
+        "Total Due",
+        "Validation Status",
+        "Validation Errors",
+        "Created At",
+    ]
 
-    for cell in worksheet[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            wrap_text=True,
-        )
-        cell.border = Border(
-            bottom=thin_gray,
-        )
+    ws.append(invoice_headers)
 
-    worksheet.row_dimensions[1].height = 34
-    worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = worksheet.dimensions
+    keys = [
+        "source_file",
+        "vendor",
+        "invoice_number",
+        "invoice_date",
+        "due_date",
+        "description",
+        "subtotal",
+        "tax",
+        "shipping",
+        "total_due",
+        "validation_status",
+        "validation_errors",
+        "created_at",
+    ]
 
-    for column_letter in ["G", "H", "I", "J"]:
-        for cell in worksheet[column_letter][1:]:
-            cell.number_format = '$#,##0.00'
-            cell.alignment = Alignment(
-                horizontal="right",
-                vertical="top",
-            )
+    for inv in invoices:
+        ws.append([inv.get(k) for k in keys])
 
-    for column_letter in ["A", "B", "C", "D", "E", "F", "K", "L", "M"]:
-        for cell in worksheet[column_letter][1:]:
-            cell.alignment = Alignment(
-                vertical="top",
-                wrap_text=True,
-            )
+    _style_header(ws)
 
-    for row in worksheet.iter_rows(
-        min_row=2,
-        max_row=worksheet.max_row,
-    ):
-        for cell in row:
-            cell.border = Border(
-                bottom=thin_gray,
-            )
+    for col in ["G", "H", "I", "J"]:
+        for cell in ws[col][1:]:
+            cell.number_format = "$#,##0.00"
 
-    column_widths = {
-        "A": 30,
-        "B": 28,
-        "C": 20,
-        "D": 18,
-        "E": 18,
-        "F": 48,
-        "G": 14,
-        "H": 12,
-        "I": 12,
-        "J": 14,
-        "K": 18,
-        "L": 48,
-        "M": 21,
-    }
+    _make_table(ws, "InvoicesTable")
+    _autosize(ws)
 
-    for column_letter, width in column_widths.items():
-        worksheet.column_dimensions[column_letter].width = width
+    # ---------------- Line Items ----------------
 
-    for row_number in range(2, worksheet.max_row + 1):
-        worksheet.row_dimensions[row_number].height = 36
+    li = wb.create_sheet("Line Items")
+    li.append([
+        "Vendor",
+        "Invoice Number",
+        "Description",
+        "Quantity",
+        "Unit Price",
+        "Line Total",
+    ])
 
-    if worksheet.max_row >= 2:
-        table = Table(
-            displayName="InvoicesTable",
-            ref=f"A1:M{worksheet.max_row}",
-        )
+    if line_items:
+        for item in line_items:
+            li.append([
+                item.get("vendor"),
+                item.get("invoice_number"),
+                item.get("description"),
+                item.get("quantity"),
+                item.get("unit_price"),
+                item.get("line_total"),
+            ])
 
-        table.tableStyleInfo = TableStyleInfo(
-            name="TableStyleMedium2",
-            showFirstColumn=False,
-            showLastColumn=False,
-            showRowStripes=True,
-            showColumnStripes=False,
-        )
+    _style_header(li)
 
-        worksheet.add_table(table)
+    for col in ["E", "F"]:
+        for cell in li[col][1:]:
+            cell.number_format = "$#,##0.00"
 
-    summary = workbook.create_sheet("Summary")
+    _make_table(li, "LineItemsTable")
+    _autosize(li)
+
+    # ---------------- Vendor Summary ----------------
+
+    vs = wb.create_sheet("Vendor Summary")
+    vs.append([
+        "Vendor",
+        "Invoices",
+        "Total Spend",
+        "Average Invoice",
+        "Largest Invoice",
+    ])
+
+    if vendor_summary:
+        for row in vendor_summary:
+            vs.append([
+                row.get("vendor"),
+                row.get("invoice_count"),
+                row.get("total_spend"),
+                row.get("average_invoice"),
+                row.get("largest_invoice"),
+            ])
+
+    _style_header(vs)
+
+    for col in ["C", "D", "E"]:
+        for cell in vs[col][1:]:
+            cell.number_format = "$#,##0.00"
+
+    _make_table(vs, "VendorSummaryTable")
+    _autosize(vs)
+
+    # ---------------- Executive Summary ----------------
+
+    summary = wb.create_sheet("Summary")
 
     summary["A1"] = "AP Accounts Payable Ledger"
-    summary["A1"].font = Font(
-        bold=True,
-        size=18,
-        color="FFFFFF",
-    )
-    summary["A1"].fill = header_fill
-    summary.merge_cells("A1:D1")
+    summary["A1"].font = Font(size=18, bold=True)
+    summary.merge_cells("A1:B1")
 
-    total_value = sum(
-        float(invoice.get("total_due") or 0)
-        for invoice in invoices
-    )
+    total = sum(float(i.get("total_due") or 0) for i in invoices)
+    valid = sum(1 for i in invoices if i.get("validation_status") == "Valid")
 
-    valid_count = sum(
-        1
-        for invoice in invoices
-        if invoice.get("validation_status") == "Valid"
-    )
+    rows = [
+        ("Invoices", len(invoices)),
+        ("Total Spend", total),
+        ("Validated", valid),
+        ("Needs Review", len(invoices) - valid),
+    ]
 
-    summary["A3"] = "Total invoices"
-    summary["B3"] = len(invoices)
+    r = 3
+    for label, value in rows:
+        summary[f"A{r}"] = label
+        summary[f"B{r}"] = value
+        if isinstance(value, (int, float)) and "Spend" in label:
+            summary[f"B{r}"].number_format = "$#,##0.00"
+        r += 1
 
-    summary["A4"] = "Total invoice value"
-    summary["B4"] = total_value
-    summary["B4"].number_format = '$#,##0.00'
+    _autosize(summary)
 
-    summary["A5"] = "Validated invoices"
-    summary["B5"] = valid_count
-
-    summary["A6"] = "Needs review"
-    summary["B6"] = len(invoices) - valid_count
-
-    summary.column_dimensions["A"].width = 26
-    summary.column_dimensions["B"].width = 18
-
-    for row_number in range(3, 7):
-        summary[f"A{row_number}"].font = Font(
-            bold=True,
-        )
-        summary[f"A{row_number}"].alignment = Alignment(
-            wrap_text=True,
-        )
-
-    workbook.save(output_path)
+    wb.save(output_path)
