@@ -8,6 +8,8 @@ __pycache__/
 # macOS
 .DS_Store
 
+data/*.db
+
 # VS Code
 .vscode/
 

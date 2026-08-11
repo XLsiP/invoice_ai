@@ -3,6 +3,9 @@ import os
 from typing import Any, Dict, List
 
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def safe_float(value: Any) -> float:
