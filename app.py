@@ -10,11 +10,13 @@ from src import analytics
 from src.ai_assistant import answer_question
 from src.ai_parser import extract_invoice_fields_with_ai
 from src.database import (
+    delete_invoice,
     get_all_invoices,
     get_invoice_line_items,
     initialize_database,
     save_invoice,
     search_invoices,
+    update_invoice,
 )
 from src.excel_export import export_invoices_to_excel
 from src.executive_summary import build_full_executive_report
@@ -965,6 +967,138 @@ def invoices_to_dataframe(invoices: List[Dict[str, Any]]) -> pd.DataFrame:
     return dataframe[available_columns]
 
 
+def render_invoice_edit_form(invoice: Dict[str, Any]) -> None:
+    """Editable form for correcting an already-saved invoice, mirrors the upload review form."""
+
+    invoice_id = invoice["id"]
+
+    with st.form(f"edit_invoice_{invoice_id}"):
+        vendor = st.text_input("Vendor", value=clean_text_value(invoice.get("vendor")))
+        invoice_number = st.text_input("Invoice Number", value=clean_text_value(invoice.get("invoice_number")))
+
+        date_left, date_right = st.columns(2)
+
+        with date_left:
+            invoice_date = st.text_input(
+                "Invoice Date", value=clean_text_value(invoice.get("invoice_date")), placeholder="YYYY-MM-DD"
+            )
+
+        with date_right:
+            due_date = st.text_input(
+                "Due Date", value=clean_text_value(invoice.get("due_date")), placeholder="YYYY-MM-DD"
+            )
+
+        money_left, money_right = st.columns(2)
+
+        with money_left:
+            subtotal = st.number_input(
+                "Subtotal", value=clean_number_value(invoice.get("subtotal")), min_value=0.0, step=0.01, format="%.2f"
+            )
+            tax = st.number_input(
+                "Tax", value=clean_number_value(invoice.get("tax")), min_value=0.0, step=0.01, format="%.2f"
+            )
+
+        with money_right:
+            shipping = st.number_input(
+                "Shipping", value=clean_number_value(invoice.get("shipping")), min_value=0.0, step=0.01, format="%.2f"
+            )
+            total_due = st.number_input(
+                "Total Due", value=clean_number_value(invoice.get("total_due")), min_value=0.0, step=0.01, format="%.2f"
+            )
+
+        description = st.text_area(
+            "Description", value=clean_text_value(invoice.get("description")), height=90
+        )
+
+        st.markdown("#### Purchased Items")
+        st.caption("Edit, add, or delete purchased items.")
+
+        edited_items = st.data_editor(
+            prepare_line_items(invoice),
+            hide_index=True,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                **LINE_ITEM_COLUMN_CONFIG,
+                "quantity": st.column_config.NumberColumn("Qty", min_value=0, step=1),
+            },
+        )
+
+        save_col, cancel_col = st.columns(2)
+
+        with save_col:
+            save = st.form_submit_button("Save changes", type="primary", use_container_width=True)
+
+        with cancel_col:
+            cancel = st.form_submit_button("Cancel", use_container_width=True)
+
+    if cancel:
+        st.session_state.pop("editing_invoice_id", None)
+        st.rerun()
+
+    if not save:
+        return
+
+    corrected_invoice = {
+        **invoice,
+        "vendor": vendor.strip() or None,
+        "invoice_number": invoice_number.strip() or None,
+        "invoice_date": invoice_date.strip() or None,
+        "due_date": due_date.strip() or None,
+        "description": description.strip() or None,
+        "subtotal": subtotal,
+        "tax": tax,
+        "shipping": shipping,
+        "total_due": total_due,
+        "line_items": clean_line_items(edited_items),
+    }
+
+    corrected_invoice = prepare_invoice(corrected_invoice, invoice.get("source_file", ""))
+    update_invoice(DATABASE_PATH, invoice_id, corrected_invoice)
+
+    st.session_state.pop("editing_invoice_id", None)
+    st.success("Invoice updated.")
+    st.rerun()
+
+
+def render_delete_confirmation(invoice: Dict[str, Any]) -> bool:
+    """Render the delete confirmation card for a saved invoice.
+
+    Returns True if the confirmation is currently showing, so the caller
+    can skip rendering the rest of the invoice viewer underneath it.
+    """
+
+    invoice_id = invoice["id"]
+
+    if st.session_state.get("pending_delete_invoice_id") != invoice_id:
+        return False
+
+    render_card(
+        "Delete this invoice?",
+        f"This will permanently remove {invoice.get('source_file') or 'this invoice'} "
+        "and its purchased items from the database. This cannot be undone.",
+        status="danger",
+    )
+
+    confirm_col, cancel_col = st.columns(2)
+
+    with confirm_col:
+        if st.button(
+            "Confirm delete", type="primary", use_container_width=True, key=f"confirm_delete_{invoice_id}"
+        ):
+            delete_invoice(DATABASE_PATH, invoice_id)
+            st.session_state.pop("pending_delete_invoice_id", None)
+            st.success("Invoice deleted.")
+            st.rerun()
+
+    with cancel_col:
+        if st.button("Cancel", use_container_width=True, key=f"cancel_delete_{invoice_id}"):
+            st.session_state.pop("pending_delete_invoice_id", None)
+            st.rerun()
+
+    return True
+
+
 def render_database_page() -> None:
     """Search and review invoices stored in SQLite."""
 
@@ -1026,6 +1160,36 @@ def render_database_page() -> None:
 
     selected = st.selectbox("Choose an invoice", options)
     invoice = invoices[options.index(selected)]
+    invoice_id = invoice["id"]
+
+    # Discard any edit/delete intent left over from a previously selected
+    # invoice — switching away from an in-progress edit abandons it rather
+    # than letting it silently resurface if that invoice is picked again.
+    if st.session_state.get("editing_invoice_id") not in (None, invoice_id):
+        st.session_state.pop("editing_invoice_id", None)
+
+    if st.session_state.get("pending_delete_invoice_id") not in (None, invoice_id):
+        st.session_state.pop("pending_delete_invoice_id", None)
+
+    if st.session_state.get("editing_invoice_id") == invoice_id:
+        st.subheader("Edit Invoice")
+        render_invoice_edit_form(invoice)
+        return
+
+    edit_col, delete_col = st.columns(2)
+
+    with edit_col:
+        if st.button("Edit invoice", use_container_width=True, key=f"edit_{invoice_id}"):
+            st.session_state["editing_invoice_id"] = invoice_id
+            st.rerun()
+
+    with delete_col:
+        if st.button("Delete invoice", use_container_width=True, key=f"delete_{invoice_id}"):
+            st.session_state["pending_delete_invoice_id"] = invoice_id
+            st.rerun()
+
+    if render_delete_confirmation(invoice):
+        return
 
     preview_col, info_col = st.columns([1.15, 1], gap="large")
 
