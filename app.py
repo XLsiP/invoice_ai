@@ -18,6 +18,7 @@ from src.database import (
     search_invoices,
     update_invoice,
 )
+from src.demo_data import seed_demo_data
 from src.excel_export import export_invoices_to_excel
 from src.executive_summary import build_full_executive_report
 from src.line_item_parser import extract_line_items_with_ai
@@ -2125,8 +2126,10 @@ def main() -> None:
 
     apply_styles()
     initialize_database(DATABASE_PATH)
+    seed_demo_data(DATABASE_PATH, UPLOAD_FOLDER)
 
     render_sidebar_brand()
+    st.sidebar.caption("Showing sample invoice data.")
 
     navigation = st.sidebar.radio(
         "Navigation",
