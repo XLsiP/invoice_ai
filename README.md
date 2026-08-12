@@ -1,6 +1,6 @@
-# Invoice AI
+# Accounts Payable
 
-Invoice AI is a Python application that automates invoice data entry.
+Accounts Payable is a Python application that automates invoice data entry.
 
 The application reads invoice PDFs and images, extracts important financial
 information, allows the user to review the extracted data, and generates a
