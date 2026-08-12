@@ -1,53 +1,35 @@
 # Accounts Payable
 
-Accounts Payable is a Python application that automates invoice data entry.
+**[Live demo →](https://accountspayable.streamlit.app/)**
 
-The application reads invoice PDFs and images, extracts important financial
-information, allows the user to review the extracted data, and generates a
-structured Excel report.
+An AI-powered invoice processing and accounts payable reporting tool built for a professional hockey team's finance operations. The deployed demo comes pre-loaded with a small set of realistic sample invoices, so you can explore every page immediately without uploading anything.
 
-The goal is to reduce repetitive manual invoice entry from hours of work to
-minutes while preserving human review for accuracy.
+## What it does
 
-## Version 1 Goals
+- **Upload** PDF or image invoices → automatic field and line-item extraction via the OpenAI API, with a regex-based fallback parser if the model call fails
+- **OCR fallback** for scanned or image-based invoices with no embedded text, via PyMuPDF + Tesseract
+- **Manual review and approval** before anything is saved — original document and extracted data shown side by side, fully editable
+- **Edit or delete** any saved invoice at any time
+- **SQLite-backed ledger** with full-text search across vendor, invoice number, and purchased items
+- **Automatic duplicate-invoice detection**
+- **Insights** — ask natural-language questions ("who do we spend the most with?", "what invoices need review?"), explore interactive spend charts (vendor concentration, monthly trend, invoice amount distribution, validation status), and drill into individual vendors
+- **Executive Report** — one-click AI-generated CFO-style narrative report, plus vendor/product spend-concentration charts, a risk assessment, and management recommendations
+- **Excel export** — a formatted, multi-sheet workbook (invoices, line items, vendor summary) for offline use
 
-The first version of Invoice AI will:
+## Tech stack
 
-- Process multiple PDF invoices
-- Extract embedded PDF text
-- Use OCR when embedded text is unavailable
-- Extract common invoice fields
-- Validate missing or suspicious information
-- Export reviewed invoice data to Excel
+Python · Streamlit · OpenAI API · SQLite · PyMuPDF (PDF parsing + OCR) · Altair (charts) · openpyxl (Excel export)
 
-## Processing Pipeline
+## Notes
+
+- The deployed demo's uploaded files and database reset on redeploy or after the app sleeps from inactivity (Streamlit Community Cloud's filesystem is ephemeral by design) — sample data reseeds automatically so it's never empty.
+- Real invoices and financial data should never be committed to this repository — synthetic or properly redacted documents only. See `.gitignore`.
+
+## Processing pipeline
 
 1. Validate the uploaded file
-2. Extract embedded PDF text
-3. Use OCR when necessary
-4. Parse invoice fields
-5. Validate extracted values
-6. Flag uncertain information for human review
-7. Export the approved data to Excel
-
-## Initial Invoice Fields
-
-- Source file
-- Vendor name
-- Invoice number
-- Invoice date
-- Due date
-- Purchase order number
-- Subtotal
-- Tax
-- Shipping
-- Total amount
-- Payment terms
-- Description
-- Processing status
-
-## Privacy
-
-Real company invoices and generated financial reports must not be committed
-to the Git repository. Development should use synthetic or properly redacted
-documents.
+2. Extract embedded PDF text (or run OCR if none is found)
+3. Extract structured invoice fields and line items via AI
+4. Validate extracted values and flag mismatches for review
+5. Store in the invoice database after manual approval
+6. Surface insights, an AI-generated executive report, and Excel export from the stored data
