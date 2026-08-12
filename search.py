@@ -1,4 +1,18 @@
+"""
+Legacy CLI entry point — predates the Streamlit app (app.py).
+
+Command-line search over the invoice database. The Streamlit app's
+Database page covers this same search interactively now, so this script
+is kept only as a scriptable/automatable alternative.
+"""
+
+import sys
 from pathlib import Path
+
+# This file lives in scripts/, one level below the repo root, so the repo
+# root needs to be added to sys.path for `from src...` imports to resolve
+# regardless of the current working directory it's run from.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.database import get_all_invoices, search_invoices
 
@@ -17,7 +31,7 @@ def print_invoice(invoice: dict) -> None:
 
 
 def main() -> None:
-    database_path = Path("data/invoices.db")
+    database_path = Path(__file__).resolve().parent.parent / "data" / "invoices.db"
 
     search_term = input(
         "Search by vendor, invoice number, or filename "

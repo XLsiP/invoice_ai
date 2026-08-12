@@ -1,4 +1,19 @@
+"""
+Legacy CLI entry point — predates the Streamlit app (app.py).
+
+Batch-processes every PDF/image in the invoices/ folder from the command
+line: extracts fields, validates, saves to the database, and exports an
+Excel report. The Streamlit app covers this same workflow interactively
+now, so this script is kept only as a scriptable/automatable alternative.
+"""
+
+import sys
 from pathlib import Path
+
+# This file lives in scripts/, one level below the repo root, so the repo
+# root needs to be added to sys.path for `from src...` imports to resolve
+# regardless of the current working directory it's run from.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.database import (
     get_all_invoices, initialize_database, save_invoice, search_invoices,
@@ -11,9 +26,9 @@ from src.validator import validate_invoice
 
 
 def main() -> None:
-    invoices_folder = Path("invoices")
-    output_path = Path("excel/invoice_report.xlsx")
-    database_path = Path("data/invoices.db")
+    invoices_folder = Path(__file__).resolve().parent.parent / "invoices"
+    output_path = Path(__file__).resolve().parent.parent / "excel" / "invoice_report.xlsx"
+    database_path = Path(__file__).resolve().parent.parent / "data" / "invoices.db"
 
     initialize_database(database_path)
 
